@@ -309,6 +309,7 @@ export default class Request implements Request {
 
 		const taskID = asyncTaskManager.startTask(() => {
 			this[PropertySymbol.aborted] = true;
+			FetchBodyUtility.abortBodyStreamRead(this);
 			this.signal[PropertySymbol.abort]();
 		});
 		let buffer: Buffer;
@@ -360,6 +361,7 @@ export default class Request implements Request {
 
 		const taskID = asyncTaskManager.startTask(() => {
 			this[PropertySymbol.aborted] = true;
+			FetchBodyUtility.abortBodyStreamRead(this);
 			this.signal[PropertySymbol.abort]();
 		});
 		let buffer: Buffer;
@@ -397,6 +399,7 @@ export default class Request implements Request {
 
 		const taskID = asyncTaskManager.startTask(() => {
 			this[PropertySymbol.aborted] = true;
+			FetchBodyUtility.abortBodyStreamRead(this);
 			this.signal[PropertySymbol.abort]();
 		});
 		let buffer: Buffer;

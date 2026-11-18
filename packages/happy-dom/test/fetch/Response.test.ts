@@ -489,6 +489,27 @@ describe('Response', () => {
 		});
 	});
 
+	describe('Pending body read on shutdown', () => {
+		for (const method of <const>['arrayBuffer', 'blob', 'buffer', 'text', 'json']) {
+			for (const shutdown of <const>['close', 'abort']) {
+				it(`Rejects a pending ${method}() with an AbortError when happyDOM.${shutdown}() is called.`, async () => {
+					// A stream that never enqueues anything nor closes, so the read can only end through the shutdown.
+					const response = new window.Response(new ReadableStream({ start() {} }));
+					const promise = response[method]();
+					let error: Error | null = null;
+
+					promise.catch((e) => (error = e));
+
+					await window.happyDOM[shutdown]();
+					await new Promise((resolve) => setTimeout(resolve, 0));
+
+					expect(error).toBeInstanceOf(DOMException);
+					expect((<DOMException>(<unknown>error)).name).toBe(DOMExceptionNameEnum.abortError);
+				});
+			}
+		}
+	});
+
 	describe('clone()', () => {
 		it('Returns a clone.', async () => {
 			const response = new window.Response('Hello World', {

@@ -123,6 +123,7 @@ export default class Response implements Response {
 		if (!buffer) {
 			const taskID = asyncTaskManager.startTask(() => {
 				this[PropertySymbol.aborted] = true;
+				FetchBodyUtility.abortBodyStreamRead(this);
 			});
 
 			try {
@@ -185,6 +186,7 @@ export default class Response implements Response {
 		if (!buffer) {
 			const taskID = asyncTaskManager.startTask(() => {
 				this[PropertySymbol.aborted] = true;
+				FetchBodyUtility.abortBodyStreamRead(this);
 			});
 			try {
 				buffer = await FetchBodyUtility.consumeBodyStream(window, this);
@@ -231,6 +233,7 @@ export default class Response implements Response {
 		if (!buffer) {
 			const taskID = asyncTaskManager.startTask(() => {
 				this[PropertySymbol.aborted] = true;
+				FetchBodyUtility.abortBodyStreamRead(this);
 			});
 			try {
 				buffer = await FetchBodyUtility.consumeBodyStream(window, this);

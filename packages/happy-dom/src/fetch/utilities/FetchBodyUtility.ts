@@ -16,6 +16,9 @@ import type BrowserWindow from '../../window/BrowserWindow.js';
  * Fetch body utility.
  */
 export default class FetchBodyUtility {
+	// Readers of body streams that are currently being consumed, keyed by the Request or Response reading them.
+	static #activeReaders: WeakMap<object, ReadableStreamDefaultReader> = new WeakMap();
+
 	/**
 	 * Parses body and returns stream and type.
 	 *
@@ -201,23 +204,31 @@ export default class FetchBodyUtility {
 		const chunks = [];
 		let bytes = 0;
 
+		const throwIfAborted = (): void => {
+			if (requestOrResponse[PropertySymbol.error]) {
+				throw requestOrResponse[PropertySymbol.error];
+			}
+			if (requestOrResponse[PropertySymbol.aborted]) {
+				throw new window.DOMException(
+					'Failed to read response body: The stream was aborted.',
+					DOMExceptionNameEnum.abortError
+				);
+			}
+		};
+
+		this.#activeReaders.set(requestOrResponse, reader);
+
 		try {
 			let readResult = await reader.read();
 			while (!readResult.done) {
-				if (requestOrResponse[PropertySymbol.error]) {
-					throw requestOrResponse[PropertySymbol.error];
-				}
-				if (requestOrResponse[PropertySymbol.aborted]) {
-					throw new window.DOMException(
-						'Failed to read response body: The stream was aborted.',
-						DOMExceptionNameEnum.abortError
-					);
-				}
+				throwIfAborted();
 				const chunk = readResult.value;
 				bytes += chunk.length;
 				chunks.push(chunk);
 				readResult = await reader.read();
 			}
+			// The stream also ends ("done") when the reader is cancelled by abortBodyStreamRead().
+			throwIfAborted();
 		} catch (error) {
 			if (error instanceof DOMException) {
 				throw error;
@@ -226,6 +237,8 @@ export default class FetchBodyUtility {
 				`Failed to read response body. Error: ${(<Error>error).message}.`,
 				DOMExceptionNameEnum.encodingError
 			);
+		} finally {
+			this.#activeReaders.delete(requestOrResponse);
 		}
 
 		try {
@@ -241,6 +254,23 @@ export default class FetchBodyUtility {
 			);
 		}
 	}
+	/**
+	 * Interrupts a body read started by consumeBodyStream() that is waiting for data.
+	 *
+	 * The caller must set [PropertySymbol.aborted] on the request or response first, so that consumeBodyStream() rejects with an AbortError instead of resolving with the data read so far.
+	 *
+	 * @param requestOrResponse Request or Response.
+	 */
+	public static abortBodyStreamRead(requestOrResponse: object): void {
+		const reader = this.#activeReaders.get(requestOrResponse);
+
+		if (reader) {
+			this.#activeReaders.delete(requestOrResponse);
+			// Cancelling resolves a pending read() with "done". It rejects if the stream has already errored, which consumeBodyStream() handles.
+			reader.cancel().catch(() => {});
+		}
+	}
+
 	/**
 	 * Wraps a given value in a browser ReadableStream.
 	 *
