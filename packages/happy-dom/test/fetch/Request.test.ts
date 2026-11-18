@@ -1,4 +1,6 @@
 import Window from '../../src/window/Window.js';
+import type BrowserWindow from '../../src/window/BrowserWindow.js';
+import Browser from '../../src/browser/Browser.js';
 import type Document from '../../src/nodes/document/Document.js';
 import Request from '../../src/fetch/Request.js';
 import URL from '../../src/url/URL.js';
@@ -842,26 +844,134 @@ describe('Request', () => {
 	});
 
 	describe('Pending body read on shutdown', () => {
+		const shutdownScenarios: Array<{
+			name: string;
+			setup: () => {
+				window: BrowserWindow;
+				shutdown: () => Promise<unknown>;
+				cleanup?: () => Promise<void>;
+			};
+		}> = [
+			{
+				name: 'window.happyDOM.close()',
+				setup: () => {
+					const window = new Window();
+					return { window, shutdown: () => window.happyDOM.close() };
+				}
+			},
+			{
+				name: 'window.happyDOM.abort()',
+				setup: () => {
+					const window = new Window();
+					return {
+						window,
+						shutdown: () => window.happyDOM.abort(),
+						cleanup: () => window.happyDOM.close()
+					};
+				}
+			},
+			{
+				name: 'page.close()',
+				setup: () => {
+					const browser = new Browser();
+					const page = browser.newPage();
+					return {
+						window: page.mainFrame.window,
+						shutdown: () => page.close(),
+						cleanup: () => browser.close()
+					};
+				}
+			},
+			{
+				name: 'browser.close()',
+				setup: () => {
+					const browser = new Browser();
+					const page = browser.newPage();
+					return { window: page.mainFrame.window, shutdown: () => browser.close() };
+				}
+			},
+			{
+				name: 'page.goto()',
+				setup: () => {
+					const browser = new Browser();
+					const page = browser.newPage();
+					return {
+						window: page.mainFrame.window,
+						shutdown: () => page.goto('about:blank'),
+						cleanup: () => browser.close()
+					};
+				}
+			},
+			{
+				name: 'navigating with window.location.href',
+				setup: () => {
+					const browser = new Browser();
+					const page = browser.newPage();
+					return {
+						window: page.mainFrame.window,
+						shutdown: () => {
+							page.mainFrame.window.location.href = 'about:blank';
+							return page.waitUntilComplete();
+						},
+						cleanup: () => browser.close()
+					};
+				}
+			}
+		];
+
 		for (const method of <const>['arrayBuffer', 'blob', 'buffer', 'text', 'json']) {
-			for (const shutdown of <const>['close', 'abort']) {
-				it(`Rejects a pending ${method}() with an AbortError when happyDOM.${shutdown}() is called.`, async () => {
+			for (const scenario of shutdownScenarios) {
+				it(`Rejects a pending ${method}() with an AbortError on ${scenario.name}.`, async () => {
+					const { window, shutdown, cleanup } = scenario.setup();
 					// A stream that never enqueues anything nor closes, so the read can only end through the shutdown.
 					const request = new window.Request(TEST_URL, {
 						method: 'POST',
 						body: new ReadableStream({ start() {} })
 					});
-					const promise = request[method]();
 					let error: Error | null = null;
 
-					promise.catch((e) => (error = e));
+					request[method]().catch((e) => (error = e));
 
-					await window.happyDOM[shutdown]();
+					await shutdown();
 					await new Promise((resolve) => setTimeout(resolve, 0));
 
 					expect(error).toBeInstanceOf(DOMException);
 					expect((<DOMException>(<unknown>error)).name).toBe(DOMExceptionNameEnum.abortError);
+
+					await cleanup?.();
 				});
 			}
+
+			it(`Resolves ${method}() normally when the body finishes before a shutdown.`, async () => {
+				const browser = new Browser();
+				const page = browser.newPage();
+				const request = new page.mainFrame.window.Request(TEST_URL, {
+					method: 'POST',
+					body: new ReadableStream({
+						start(controller) {
+							setTimeout(() => {
+								controller.enqueue(Buffer.from('{"a":1}'));
+								controller.close();
+							}, 10);
+						}
+					})
+				});
+
+				const result = await request[method]();
+				await page.close();
+
+				const text =
+					method === 'json'
+						? JSON.stringify(result)
+						: method === 'blob'
+							? await (<Blob>result).text()
+							: Buffer.from(<ArrayBuffer>result).toString();
+
+				expect(text).toBe('{"a":1}');
+				expect(page.mainFrame.window.closed).toBe(true);
+
+				await browser.close();
+			});
 		}
 	});
 
