@@ -187,6 +187,10 @@ export default class BrowserFrameNavigator {
 		};
 
 		if (frame.childFrames.length) {
+			// Clears the timers and aborts the tasks of the previous Window right away, so that they don't run while the child frames are being destroyed.
+			// It is destroyed again in destroyWindowAndAsyncTaskManager(), once the child frames are destroyed.
+			previousAsyncTaskManager.destroy().catch(() => {});
+
 			Promise.all(
 				frame.childFrames.map((childFrame) => BrowserFrameFactory.destroyFrame(childFrame))
 			).then(destroyWindowAndAsyncTaskManager);

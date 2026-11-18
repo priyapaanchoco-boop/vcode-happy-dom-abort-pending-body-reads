@@ -9,6 +9,7 @@ import * as PropertySymbol from '../PropertySymbol.js';
 import Base64 from '../base64/Base64.js';
 import BrowserErrorCaptureEnum from '../browser/enums/BrowserErrorCaptureEnum.js';
 import type IBrowserFrame from '../browser/types/IBrowserFrame.js';
+import type AsyncTaskManager from '../async-task-manager/AsyncTaskManager.js';
 import Clipboard from '../clipboard/Clipboard.js';
 import ClipboardItem from '../clipboard/ClipboardItem.js';
 import CSS from '../css/CSS.js';
@@ -854,6 +855,8 @@ export default class BrowserWindow extends EventTarget implements INodeJSGlobal 
 
 	// Private properties
 	#browserFrame: IBrowserFrame;
+	// The task manager this window was created with. Navigation gives the frame a new task manager for the new window, so timers must not be registered on whatever the frame currently has.
+	#asyncTaskManager: AsyncTaskManager;
 	#innerWidth: number | null = null;
 	#innerHeight: number | null = null;
 	#outerWidth: number | null = null;
@@ -874,6 +877,7 @@ export default class BrowserWindow extends EventTarget implements INodeJSGlobal 
 		super();
 
 		this.#browserFrame = browserFrame;
+		this.#asyncTaskManager = browserFrame[PropertySymbol.asyncTaskManager];
 
 		this[PropertySymbol.validateJavaScriptExecutionEnvironment]();
 
@@ -1418,10 +1422,10 @@ export default class BrowserWindow extends EventTarget implements INodeJSGlobal 
 					(!settings.disableErrorCapturing &&
 						settings.errorCapture === BrowserErrorCaptureEnum.tryAndCatch);
 
+				const timeouts: Timeout[] = [];
 				const id = TIMER.setTimeout(() => {
 					// We need to call endTimer() before the callback as the callback might throw an error.
-					this.#browserFrame[PropertySymbol.asyncTaskManager].endTimer(id);
-					const timeouts = zeroDelayTimeout.timeouts!;
+					this.#asyncTaskManager.endTimer(id);
 					zeroDelayTimeout.timeouts = null;
 					for (const timeout of timeouts) {
 						if (useTryCatch) {
@@ -1440,13 +1444,20 @@ export default class BrowserWindow extends EventTarget implements INodeJSGlobal 
 					}
 				}, 0);
 
-				zeroDelayTimeout.timeouts = [];
-				this.#browserFrame[PropertySymbol.asyncTaskManager].startTimer(id);
+				zeroDelayTimeout.timeouts = timeouts;
+				this.#asyncTaskManager.startTimer(id, () => {
+					// The task manager cleared the timer (e.g. on abort), so the grouped timeouts will never run.
+					// Start a new group on the next setTimeout() instead of adding to this one.
+					if (zeroDelayTimeout.timeouts === timeouts) {
+						zeroDelayTimeout.timeouts = null;
+					}
+				});
 			}
 
 			const timeout = new Timeout(() => callback(...args));
 
-			zeroDelayTimeout.timeouts.push(timeout);
+			// The group is null here if the task manager is destroyed, as it cleared the timer straight away. The timeout would never run then.
+			zeroDelayTimeout.timeouts?.push(timeout);
 
 			return <NodeJS.Timeout>(<unknown>timeout);
 		}
@@ -1459,7 +1470,7 @@ export default class BrowserWindow extends EventTarget implements INodeJSGlobal 
 		const id = TIMER.setTimeout(
 			() => {
 				// We need to call endTimer() before the callback as the callback might throw an error.
-				this.#browserFrame[PropertySymbol.asyncTaskManager].endTimer(id);
+				this.#asyncTaskManager.endTimer(id);
 				if (useTryCatch) {
 					let result: any;
 					try {
@@ -1478,7 +1489,7 @@ export default class BrowserWindow extends EventTarget implements INodeJSGlobal 
 				? settings?.timer.maxTimeout
 				: delay
 		);
-		this.#browserFrame[PropertySymbol.asyncTaskManager].startTimer(id);
+		this.#asyncTaskManager.startTimer(id);
 		return id;
 	}
 
@@ -1505,7 +1516,7 @@ export default class BrowserWindow extends EventTarget implements INodeJSGlobal 
 			return;
 		}
 		TIMER.clearTimeout(id);
-		this.#browserFrame[PropertySymbol.asyncTaskManager].endTimer(id);
+		this.#asyncTaskManager.endTimer(id);
 	}
 
 	/**
@@ -1556,7 +1567,7 @@ export default class BrowserWindow extends EventTarget implements INodeJSGlobal 
 				? settings?.timer.maxIntervalTime
 				: delay
 		);
-		this.#browserFrame[PropertySymbol.asyncTaskManager].startTimer(id);
+		this.#asyncTaskManager.startTimer(id);
 		return id;
 	}
 
@@ -1572,7 +1583,7 @@ export default class BrowserWindow extends EventTarget implements INodeJSGlobal 
 			return;
 		}
 		TIMER.clearInterval(id);
-		this.#browserFrame[PropertySymbol.asyncTaskManager].endTimer(id);
+		this.#asyncTaskManager.endTimer(id);
 	}
 
 	/**
@@ -1617,7 +1628,7 @@ export default class BrowserWindow extends EventTarget implements INodeJSGlobal 
 				settings.errorCapture === BrowserErrorCaptureEnum.tryAndCatch);
 		const id = TIMER.setImmediate(() => {
 			// We need to call endImmediate() before the callback as the callback might throw an error.
-			this.#browserFrame[PropertySymbol.asyncTaskManager].endImmediate(id);
+			this.#asyncTaskManager.endImmediate(id);
 			if (useTryCatch) {
 				let result: any;
 				try {
@@ -1632,7 +1643,7 @@ export default class BrowserWindow extends EventTarget implements INodeJSGlobal 
 				callback(this.performance.now());
 			}
 		});
-		this.#browserFrame[PropertySymbol.asyncTaskManager].startImmediate(id);
+		this.#asyncTaskManager.startImmediate(id);
 		return id;
 	}
 
@@ -1648,7 +1659,7 @@ export default class BrowserWindow extends EventTarget implements INodeJSGlobal 
 			return;
 		}
 		TIMER.clearImmediate(id);
-		this.#browserFrame[PropertySymbol.asyncTaskManager].endImmediate(id);
+		this.#asyncTaskManager.endImmediate(id);
 	}
 
 	/**
@@ -1661,9 +1672,7 @@ export default class BrowserWindow extends EventTarget implements INodeJSGlobal 
 			return;
 		}
 		let isAborted = false;
-		const taskId = this.#browserFrame[PropertySymbol.asyncTaskManager].startTask(
-			() => (isAborted = true)
-		);
+		const taskId = this.#asyncTaskManager.startTask(() => (isAborted = true));
 		const settings = this.#browserFrame.page.context.browser.settings;
 		const useTryCatch =
 			!settings ||
@@ -1672,7 +1681,7 @@ export default class BrowserWindow extends EventTarget implements INodeJSGlobal 
 		TIMER.queueMicrotask(() => {
 			if (!isAborted) {
 				// We need to call endTask() before the callback as the callback might throw an error.
-				this.#browserFrame[PropertySymbol.asyncTaskManager].endTask(taskId);
+				this.#asyncTaskManager.endTask(taskId);
 				if (useTryCatch) {
 					let result: any;
 					try {

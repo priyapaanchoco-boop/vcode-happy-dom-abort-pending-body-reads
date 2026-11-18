@@ -75,6 +75,10 @@ export default class BrowserFrameFactory {
 				return;
 			}
 
+			// Clears the timers and aborts the tasks of this frame right away, so that they don't run while the child frames are being destroyed.
+			// It is destroyed again below, once the child frames are destroyed, which is where errors are reported.
+			frame[PropertySymbol.asyncTaskManager].destroy().catch(() => {});
+
 			Promise.all(frame.childFrames.slice().map((childFrame) => this.destroyFrame(childFrame)))
 				.then(() => {
 					frame[PropertySymbol.asyncTaskManager]

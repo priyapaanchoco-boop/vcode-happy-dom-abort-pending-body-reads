@@ -4,7 +4,7 @@ import type HTMLLinkElement from '../../src/nodes/html-link-element/HTMLLinkElem
 import HTMLElement from '../../src/nodes/html-element/HTMLElement.js';
 import ResourceFetch from '../../src/fetch/ResourceFetch.js';
 import type HTMLScriptElement from '../../src/nodes/html-script-element/HTMLScriptElement.js';
-import type Window from '../../src/window/Window.js';
+import Window from '../../src/window/Window.js';
 import BrowserWindow from '../../src/window/BrowserWindow.js';
 import Navigator from '../../src/navigator/Navigator.js';
 import Headers from '../../src/fetch/Headers.js';
@@ -2483,5 +2483,162 @@ describe('BrowserWindow', () => {
 
 			expect(included).toEqual(expected);
 		});
+	});
+
+	describe('Timers on shutdown', () => {
+		const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+		const timers: Array<{
+			name: string;
+			start: (window: BrowserWindow, callback: () => void) => void;
+		}> = [
+			{ name: 'setTimeout() with a delay', start: (w, callback) => w.setTimeout(callback, 10) },
+			{ name: 'setTimeout() without a delay', start: (w, callback) => w.setTimeout(callback) },
+			{ name: 'setInterval()', start: (w, callback) => w.setInterval(callback, 5) },
+			{ name: 'requestAnimationFrame()', start: (w, callback) => w.requestAnimationFrame(callback) }
+		];
+
+		// Each scenario returns the windows to start timers in (the main window and an iframe window, when there is a page) and the shutdown to run.
+		const createPageWithIframe = (): {
+			browser: Browser;
+			page: IBrowserPage;
+			windows: BrowserWindow[];
+		} => {
+			const browser = new Browser();
+			const page = browser.newPage();
+			const iframe = page.mainFrame.document.createElement('iframe');
+			page.mainFrame.document.body.appendChild(iframe);
+			return {
+				browser,
+				page,
+				windows: [page.mainFrame.window, <BrowserWindow>(<unknown>iframe.contentWindow)]
+			};
+		};
+
+		const shutdownScenarios: Array<{
+			name: string;
+			setup: () => {
+				windows: BrowserWindow[];
+				shutdown: () => Promise<unknown>;
+				cleanup?: () => Promise<void>;
+			};
+		}> = [
+			{
+				name: 'window.happyDOM.close()',
+				setup: () => {
+					const window = new Window();
+					return { windows: [window], shutdown: () => window.happyDOM.close() };
+				}
+			},
+			{
+				name: 'window.happyDOM.abort()',
+				setup: () => {
+					const window = new Window();
+					return {
+						windows: [window],
+						shutdown: () => window.happyDOM.abort(),
+						cleanup: () => window.happyDOM.close()
+					};
+				}
+			},
+			{
+				name: 'page.close()',
+				setup: () => {
+					const { browser, page, windows } = createPageWithIframe();
+					return { windows, shutdown: () => page.close(), cleanup: () => browser.close() };
+				}
+			},
+			{
+				name: 'browser.close()',
+				setup: () => {
+					const { browser, windows } = createPageWithIframe();
+					return { windows, shutdown: () => browser.close() };
+				}
+			},
+			{
+				name: 'page.goto()',
+				setup: () => {
+					const { browser, page, windows } = createPageWithIframe();
+					return {
+						windows,
+						shutdown: () => page.goto('about:blank'),
+						cleanup: () => browser.close()
+					};
+				}
+			},
+			{
+				name: 'navigating with window.location.href',
+				setup: () => {
+					const { browser, page, windows } = createPageWithIframe();
+					return {
+						windows,
+						shutdown: () => {
+							page.mainFrame.window.location.href = 'about:blank';
+							return page.waitUntilComplete();
+						},
+						cleanup: () => browser.close()
+					};
+				}
+			}
+		];
+
+		for (const timer of timers) {
+			for (const scenario of shutdownScenarios) {
+				it(`Clears ${timer.name} on ${scenario.name}.`, async () => {
+					const { windows, shutdown, cleanup } = scenario.setup();
+					let calls = 0;
+
+					for (const w of windows) {
+						timer.start(w, () => calls++);
+					}
+
+					await shutdown();
+					await wait(40);
+
+					expect(calls).toBe(0);
+
+					await cleanup?.();
+				});
+			}
+
+			it(`Clears ${timer.name} started by the previous window right after the page has been swapped by navigation.`, async () => {
+				const { browser, page } = createPageWithIframe();
+				const previousWindow = page.mainFrame.window;
+				// The frame gets a new window synchronously, while the previous window is destroyed after the iframe has been destroyed.
+				const navigation = page.goto('about:blank');
+				let calls = 0;
+
+				expect(page.mainFrame.window).not.toBe(previousWindow);
+
+				timer.start(previousWindow, () => calls++);
+
+				await navigation;
+				await wait(40);
+
+				expect(calls).toBe(0);
+
+				// Would not resolve if the timer had been registered on the new page's task manager (e.g. a leaked interval).
+				await page.waitUntilComplete();
+
+				await browser.close();
+			});
+
+			it(`Runs ${timer.name} started after window.happyDOM.abort().`, async () => {
+				const window = new Window();
+				let calls = 0;
+
+				timer.start(window, () => {});
+
+				await window.happyDOM.abort();
+
+				timer.start(window, () => calls++);
+
+				await wait(40);
+
+				expect(calls).toBeGreaterThan(0);
+
+				await window.happyDOM.close();
+			});
+		}
 	});
 });

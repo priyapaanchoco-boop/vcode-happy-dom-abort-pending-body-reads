@@ -16,6 +16,7 @@ export default class AsyncTaskManager {
 	private runningTasks: { [k: string]: (destroy: boolean) => void } = {};
 	private runningTaskCount = 0;
 	private runningTimers: NodeJS.Timeout[] = [];
+	private timerAbortHandlers: Map<NodeJS.Timeout, () => void> = new Map();
 	private runningImmediates: NodeJS.Immediate[] = [];
 	private debugTrace: Map<number | NodeJS.Timeout | NodeJS.Immediate, string> = new Map();
 	private waitUntilCompleteTimer: NodeJS.Timeout | null = null;
@@ -78,10 +79,14 @@ export default class AsyncTaskManager {
 	 * Starts a timer.
 	 *
 	 * @param timerID Timer ID.
+	 * @param [abortHandler] Called if the timer is cleared by the manager (on abort or destroy) instead of by endTimer().
 	 */
-	public startTimer(timerID: NodeJS.Timeout): void {
+	public startTimer(timerID: NodeJS.Timeout, abortHandler?: () => void): void {
 		if (this.destroyed) {
 			TIMER.clearTimeout(timerID);
+			if (abortHandler) {
+				abortHandler();
+			}
 			return;
 		}
 		if (this.waitUntilCompleteTimer) {
@@ -89,6 +94,9 @@ export default class AsyncTaskManager {
 			this.waitUntilCompleteTimer = null;
 		}
 		this.runningTimers.push(timerID);
+		if (abortHandler) {
+			this.timerAbortHandlers.set(timerID, abortHandler);
+		}
 		if (this.#browserFrame.page.context.browser.settings.debug.traceWaitUntilComplete > 0) {
 			this.debugTrace.set(timerID, new AsyncTaskManagerDebugError().stack!);
 		}
@@ -100,6 +108,7 @@ export default class AsyncTaskManager {
 	 * @param timerID Timer ID.
 	 */
 	public endTimer(timerID: NodeJS.Timeout): void {
+		this.timerAbortHandlers.delete(timerID);
 		if (this.destroyed) {
 			TIMER.clearTimeout(timerID);
 			return;
@@ -302,6 +311,7 @@ export default class AsyncTaskManager {
 	 */
 	private abortAll(destroy: boolean): Promise<void> {
 		const runningTimers = this.runningTimers;
+		const timerAbortHandlers = this.timerAbortHandlers;
 		const runningImmediates = this.runningImmediates;
 		const runningTasks = this.runningTasks;
 
@@ -312,6 +322,7 @@ export default class AsyncTaskManager {
 		this.runningTaskCount = 0;
 		this.runningImmediates = [];
 		this.runningTimers = [];
+		this.timerAbortHandlers = new Map();
 		this.debugTrace = new Map();
 
 		if (this.waitUntilCompleteTimer) {
@@ -325,6 +336,10 @@ export default class AsyncTaskManager {
 
 		for (const timer of runningTimers) {
 			TIMER.clearTimeout(timer);
+		}
+
+		for (const abortHandler of timerAbortHandlers.values()) {
+			abortHandler();
 		}
 
 		for (const key of Object.keys(runningTasks)) {
